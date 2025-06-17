@@ -13,7 +13,7 @@ These benefits allow one to provision more services given the same hardware reso
 To setup a new Portainer installation within a new LXC container on your Proxmox host, download the install script to your Proxmox host's console:
 
 ```
-wget -qL https://github.com/fiveangle/proxmox_portainer_lxc/raw/master/create_container.sh
+wget -qL https://github.com/harshsinghmp/proxmox_portainer_lxc/raw/master/create_container.sh
 ```
 
 Edit `create_container.sh` to set your desired container disk size, hostname, portainer version, etc, then start the installation with:
