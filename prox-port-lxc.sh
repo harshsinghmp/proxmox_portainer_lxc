@@ -2,14 +2,14 @@
 
 # Project: Modern Proxmox Portainer LXC Setup
 # Author: harshsinghmp
-# Date: 2025-06-17 19:06:48
+# Date: 2025-06-17 21:07:44
 # License: GPL 3.0
 
 # Enable strict error handling
 set -euo pipefail
 IFS=$'\n\t'
 
-# Default values (can be overridden via environment variables)
+# Default values
 HOSTNAME=${HOSTNAME:-"portainer"}
 DISK_SIZE=${DISK_SIZE:-"8G"}
 MEMORY=${MEMORY:-"1024"}
@@ -41,6 +41,28 @@ spinner() {
         sleep $delay
     done
     printf "\r${GREEN}✓${NC} %s\n" "$2"
+}
+
+# Wait for container to be running and ready
+wait_for_container() {
+    local ctid=$1
+    local max_attempts=30
+    local attempt=1
+
+    log "Waiting for container to start..."
+    while [ $attempt -le $max_attempts ]; do
+        if pct status $ctid | grep -q "status: running"; then
+            # Additional check for network
+            if pct exec $ctid -- ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+                log "Container is running and has network connectivity"
+                return 0
+            fi
+        fi
+        printf "."
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+    error "Container failed to start properly within 60 seconds"
 }
 
 # Cleanup function
@@ -111,17 +133,21 @@ pct create $CTID $STORAGE:vztmpl/$TEMPLATE \
     --net0 name=eth0,bridge=vmbr0,ip=dhcp \
     --unprivileged 1 \
     --features nesting=1 \
-    --onboot 1 \
-    --start 1 >/dev/null 2>&1 & spinner $! "Creating container"
+    --onboot 1 >/dev/null 2>&1
 
-# Wait for container to start
-sleep 5
+# Start the container
+log "Starting container..."
+pct start $CTID
 
-# Container setup script
+# Wait for container to be ready
+wait_for_container $CTID
+
+# Prepare the setup script
+log "Preparing container setup script..."
 cat > /tmp/container_setup.sh <<'EOF'
 #!/bin/sh
 
-# Update and install requirements
+# Update repositories and install required packages
 apk update
 apk add --no-cache \
     docker \
@@ -135,6 +161,17 @@ apk add --no-cache \
 # Enable and start Docker
 rc-update add docker default
 service docker start
+
+# Wait for Docker to be ready
+timeout=30
+while ! docker info >/dev/null 2>&1; do
+    timeout=$((timeout - 1))
+    if [ $timeout -le 0 ]; then
+        echo "Docker failed to start"
+        exit 1
+    fi
+    sleep 1
+done
 
 # Create Docker networks
 docker network create portainer_agent_network || true
@@ -151,34 +188,19 @@ docker run -d \
     -v portainer_data:/data \
     portainer/portainer-ce:latest
 
-# Setup Nginx (if domain is provided)
-if [ -n "$DOMAIN" ]; then
-    cat > /etc/nginx/http.d/default.conf <<NGINX_CONF
-server {
-    listen 80;
-    server_name $DOMAIN;
-    
-    location / {
-        proxy_pass https://localhost:9443;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-    }
-}
-NGINX_CONF
-
-    rc-update add nginx default
-    service nginx start
-fi
-
 # Setup timezone
 cp /usr/share/zoneinfo/UTC /etc/localtime
+
+echo "Setup completed successfully"
 EOF
 
-# Copy and execute setup script in container
-pct push $CTID /tmp/container_setup.sh /setup.sh -perms 755
-pct exec $CTID -- sh /setup.sh
+# Copy and execute setup script
+log "Copying setup script to container..."
+pct push $CTID /tmp/container_setup.sh /setup.sh
+pct exec $CTID -- chmod +x /setup.sh
+
+log "Executing setup script in container..."
+pct exec $CTID -- /setup.sh
 
 # Get container IP
 IP=$(pct exec $CTID -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
@@ -196,13 +218,6 @@ ${BLUE}Container Information:${NC}
 ${BLUE}Portainer Access:${NC}
   Web Interface: https://$IP:9443
   API Endpoint: http://$IP:8000
-EOF
-
-if [ -n "$DOMAIN" ]; then
-    echo "  Domain Access: http://$DOMAIN"
-fi
-
-cat <<EOF
 
 ${YELLOW}Initial Setup:${NC}
 1. Access Portainer at https://$IP:9443
